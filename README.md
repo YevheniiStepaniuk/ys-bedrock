@@ -2,7 +2,12 @@
 
 Infrastructure for the stepaniuk.me pet-project stack on a Contabo VPS (4 vCPU / 8 GB, Ubuntu).
 
-Core stack (this repo, `docker-compose.yml`):
+There are two separate compose projects. Each has its own lifecycle, so deploying the edge never recreates the databases.
+
+| Stack  | File                       | Services          | Owns network |
+|--------|----------------------------|-------------------|--------------|
+| `data` | `docker-compose.data.yml`  | postgres, redis   | `internal`   |
+| `edge` | `docker-compose.yml`       | traefik           | `proxy`      |
 
 | Service  | Image               | Networks   | Exposure                                   |
 |----------|---------------------|------------|--------------------------------------------|
@@ -13,6 +18,9 @@ Core stack (this repo, `docker-compose.yml`):
 Networks:
 - `proxy`: Traefik and the web-facing apps.
 - `internal`: Postgres, Redis and the backend apps. It is `internal: true`, so there is **no internet egress**. A container that needs egress (bots, backup sidecar) also joins `proxy`.
+- Each stack creates the network it owns. Other stacks join it with `external: true`.
+
+Volume names are fixed (`postgres-data`, `redis-data`, `traefik-certs`) rather than prefixed with the project name. Renaming a project therefore never orphans data.
 
 Domains: `stepaniuk.me`, `www.stepaniuk.me` (redirects to the apex), `webhooks.stepaniuk.me`.
 
@@ -70,9 +78,13 @@ systemctl daemon-reload && systemctl restart docker
 ```bash
 git clone <repo> /opt/ys-infra && cd /opt/ys-infra
 cp .env.example .env && chmod 600 .env   # fill in values
-docker compose config -q                 # validate
-docker compose up -d
-docker compose ps
+
+# data first (creates `internal`), then edge (creates `proxy`)
+docker compose -f docker-compose.data.yml up -d --wait
+docker compose -f docker-compose.yml up -d --wait
+
+docker compose -f docker-compose.data.yml ps
+docker compose -f docker-compose.yml ps
 ```
 
 Check:
@@ -82,7 +94,7 @@ Check:
 
 ## 4. CI/CD (auto-deploy on change)
 
-[.github/workflows/deploy-infra.yml](.github/workflows/deploy-infra.yml) runs on every push to `main` that changes `docker-compose.yml`, `traefik/**` or the workflow file. You can also start it manually with **Run workflow**.
+[.github/workflows/deploy-infra.yml](.github/workflows/deploy-infra.yml) runs on every push to `main` that changes `docker-compose.yml`, `docker-compose.data.yml`, `traefik/**` or the workflow file. You can also start it manually with **Run workflow**.
 
 1. **validate**: runs `docker compose config -q` with dummy env values and a YAML check of `traefik/dynamic/*.yml`.
 2. **deploy** (GitHub environment `production`):
@@ -90,11 +102,11 @@ Check:
    - Validates them against the **real** `.env` on the server.
    - Snapshots the current config to `.deploy/previous`.
    - Swaps the new files in.
-   - Runs `docker compose pull` and `up -d --remove-orphans --wait`.
+   - For each stack, in order `data` then `edge`, runs `docker compose pull` and `up -d --remove-orphans --wait`.
 3. **Only changed services restart.** Compose recreates a container only when its config or image changes. Traefik hot-reloads `traefik/dynamic/*` without restarting.
 4. **Rollback:** if any healthcheck fails within 180s, the previous config is restored and brought back up, and the job fails.
 
-`.env` lives **only on the server**. CI never touches it. After editing `.env`, run `docker compose up -d` on the server or trigger the workflow manually.
+`.env` lives **only on the server**. CI never touches it. After editing `.env`, run `docker compose -f <stack file> up -d` for the affected stack on the server, or trigger the workflow manually.
 
 ### One-time setup
 
@@ -135,16 +147,23 @@ Delete the local `gha_deploy*` files once the secrets are saved.
 
 ## Adding an app (template)
 
+Apps live in their own stack and join both networks as external. `depends_on` doesn't work across projects, so apps must retry their DB connection on startup.
+
 ```yaml
+name: apps
+
+networks:
+  proxy:
+    external: true
+  internal:
+    external: true
+
+services:
   api:
     image: ghcr.io/<owner>/api:latest
     restart: unless-stopped
-    logging: *logging
     env_file: .env
     networks: [proxy, internal]
-    depends_on:
-      postgres: { condition: service_healthy }
-      redis: { condition: service_healthy }
     deploy:
       resources:
         limits:

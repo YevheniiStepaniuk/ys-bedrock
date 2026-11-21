@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - docker-compose.yml
+      - docker-compose.data.yml
       - traefik/**
       - .github/workflows/deploy-infra.yml
   workflow_dispatch:
@@ -27,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate docker-compose.yml
+      - name: Validate compose stacks
         env:
           # Dummy values: only checks syntax/interpolation, real values live in .env on the VPS.
           TAILSCALE_IP: 100.64.0.1
@@ -36,7 +37,11 @@ jobs:
           POSTGRES_PASSWORD: ci
           POSTGRES_DB: ci
           REDIS_PASSWORD: ci
-        run: docker compose config -q
+        run: |
+          for f in docker-compose.data.yml docker-compose.yml; do
+            docker compose -f "$f" config -q
+            echo "ok: $f"
+          done
 
       - name: Validate Traefik dynamic config (YAML)
         run: |
@@ -62,7 +67,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           fingerprint: ${{ secrets.VPS_SSH_FINGERPRINT }}
-          source: docker-compose.yml,traefik
+          source: docker-compose.yml,docker-compose.data.yml,traefik
           target: ${{ env.DEPLOY_DIR }}/.deploy/incoming
           rm: true
 
@@ -84,39 +89,56 @@ jobs:
 
             INCOMING=.deploy/incoming
             PREVIOUS=.deploy/previous
+            # Order matters: data owns `internal`, edge owns `proxy`.
+            STACKS="docker-compose.data.yml docker-compose.yml"
+            FILES="docker-compose.data.yml docker-compose.yml traefik"
 
             if [ ! -f .env ]; then
               echo "::error::$DEPLOY_DIR/.env missing on server"; exit 1
             fi
 
-            # 1. Validate new compose against the REAL .env before touching anything.
-            docker compose -f "$INCOMING/docker-compose.yml" --env-file .env \
-              --project-directory . config -q
+            # Pull + recreate only services whose config/image changed; wait for healthchecks.
+            # Explicit `|| return 1`: set -e is disabled inside functions called from `if`.
+            up_all() {
+              for f in $STACKS; do
+                [ -f "$f" ] || continue
+                echo "::group::up $f"
+                docker compose -f "$f" pull --quiet || return 1
+                docker compose -f "$f" up -d --remove-orphans --wait --wait-timeout 180 || return 1
+                docker compose -f "$f" ps
+                echo "::endgroup::"
+              done
+            }
+
+            # 1. Validate new stacks against the REAL .env before touching anything.
+            for f in $STACKS; do
+              docker compose -f "$INCOMING/$f" --env-file .env --project-directory . config -q
+            done
 
             # 2. Snapshot current config for rollback.
             rm -rf "$PREVIOUS" && mkdir -p "$PREVIOUS"
-            [ -f docker-compose.yml ] && cp -a docker-compose.yml "$PREVIOUS/"
-            [ -d traefik ] && cp -a traefik "$PREVIOUS/"
+            for x in $FILES; do
+              if [ -e "$x" ]; then cp -a "$x" "$PREVIOUS/"; fi
+            done
 
-            # 3. Install new config (dir replaced so deleted files disappear too).
-            cp -a "$INCOMING/docker-compose.yml" docker-compose.yml
-            rm -rf traefik && cp -a "$INCOMING/traefik" traefik
+            # 3. Install new config (replaced whole so deleted files disappear too).
+            for x in $FILES; do
+              rm -rf "$x" && cp -a "$INCOMING/$x" "$x"
+            done
 
-            # 4. Pull + recreate only services whose config/image changed; wait for healthchecks.
-            docker compose pull --quiet
-            if ! docker compose up -d --remove-orphans --wait --wait-timeout 180; then
+            # 4. Bring stacks up; roll back on failure.
+            if ! up_all; then
               echo "::error::Deploy unhealthy, rolling back"
-              docker compose ps
-              docker compose logs --tail 50 || true
+              for f in $STACKS; do docker compose -f "$f" logs --tail 30 || true; done
               if [ -f "$PREVIOUS/docker-compose.yml" ]; then
-                cp -a "$PREVIOUS/docker-compose.yml" docker-compose.yml
-                rm -rf traefik && cp -a "$PREVIOUS/traefik" traefik
-                docker compose up -d --remove-orphans --wait --wait-timeout 180 || true
+                for x in $FILES; do
+                  if [ -e "$PREVIOUS/$x" ]; then rm -rf "$x"; cp -a "$PREVIOUS/$x" "$x"; fi
+                done
+                up_all || true
               else
                 echo "No previous config (first deploy) - nothing to roll back to"
               fi
               exit 1
             fi
 
-            docker compose ps
             docker image prune -f
