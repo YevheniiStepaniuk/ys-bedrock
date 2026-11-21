@@ -1,0 +1,40 @@
+# Shared Traefik middlewares + edge routers (file provider, hot-reloaded).
+# Use from container labels as e.g. `secure-headers@file`.
+
+http:
+  middlewares:
+    secure-headers:
+      headers:
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        contentTypeNosniff: true
+        frameDeny: true
+        browserXssFilter: true
+        referrerPolicy: strict-origin-when-cross-origin
+        customResponseHeaders:
+          Server: ""
+          X-Powered-By: ""
+
+    www-to-apex:
+      redirectRegex:
+        regex: "^https?://www\\.stepaniuk\\.me/(.*)"
+        replacement: "https://stepaniuk.me/${1}"
+        permanent: true
+
+    # Basic rate limit for public webhook endpoints (Telegram bots).
+    webhook-ratelimit:
+      rateLimit:
+        average: 50
+        burst: 100
+
+  routers:
+    # www.stepaniuk.me -> stepaniuk.me (also issues the www cert).
+    www-redirect:
+      rule: "Host(`www.stepaniuk.me`)"
+      entryPoints:
+        - websecure
+      middlewares:
+        - www-to-apex
+      service: noop@internal
+      tls:
+        certResolver: le

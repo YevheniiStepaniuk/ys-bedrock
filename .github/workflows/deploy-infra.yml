@@ -1,0 +1,122 @@
+name: Deploy infra
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docker-compose.yml
+      - traefik/**
+      - .github/workflows/deploy-infra.yml
+  workflow_dispatch:
+
+# Never run two deploys at once; queue instead of cancelling a deploy mid-flight.
+concurrency:
+  group: deploy-infra
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DEPLOY_DIR: /opt/ys-infra
+
+jobs:
+  validate:
+    name: Validate config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate docker-compose.yml
+        env:
+          # Dummy values: only checks syntax/interpolation, real values live in .env on the VPS.
+          TAILSCALE_IP: 100.64.0.1
+          ACME_EMAIL: ci@example.com
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+          REDIS_PASSWORD: ci
+        run: docker compose config -q
+
+      - name: Validate Traefik dynamic config (YAML)
+        run: |
+          for f in traefik/dynamic/*.yml; do
+            python3 -c "import sys, yaml; yaml.safe_load(open(sys.argv[1]))" "$f"
+            echo "ok: $f"
+          done
+
+  deploy:
+    name: Deploy to VPS
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      # Upload into a staging dir; `rm: true` wipes ONLY the staging dir, never .env.
+      - name: Upload infra files
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          fingerprint: ${{ secrets.VPS_SSH_FINGERPRINT }}
+          source: docker-compose.yml,traefik
+          target: ${{ env.DEPLOY_DIR }}/.deploy/incoming
+          rm: true
+
+      - name: Apply and restart changed services
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DEPLOY_DIR: ${{ env.DEPLOY_DIR }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          fingerprint: ${{ secrets.VPS_SSH_FINGERPRINT }}
+          envs: DEPLOY_DIR
+          command_timeout: 10m
+          script: |
+            set -euo pipefail
+            cd "$DEPLOY_DIR"
+
+            INCOMING=.deploy/incoming
+            PREVIOUS=.deploy/previous
+
+            if [ ! -f .env ]; then
+              echo "::error::$DEPLOY_DIR/.env missing on server"; exit 1
+            fi
+
+            # 1. Validate new compose against the REAL .env before touching anything.
+            docker compose -f "$INCOMING/docker-compose.yml" --env-file .env \
+              --project-directory . config -q
+
+            # 2. Snapshot current config for rollback.
+            rm -rf "$PREVIOUS" && mkdir -p "$PREVIOUS"
+            [ -f docker-compose.yml ] && cp -a docker-compose.yml "$PREVIOUS/"
+            [ -d traefik ] && cp -a traefik "$PREVIOUS/"
+
+            # 3. Install new config (dir replaced so deleted files disappear too).
+            cp -a "$INCOMING/docker-compose.yml" docker-compose.yml
+            rm -rf traefik && cp -a "$INCOMING/traefik" traefik
+
+            # 4. Pull + recreate only services whose config/image changed; wait for healthchecks.
+            docker compose pull --quiet
+            if ! docker compose up -d --remove-orphans --wait --wait-timeout 180; then
+              echo "::error::Deploy unhealthy, rolling back"
+              docker compose ps
+              docker compose logs --tail 50 || true
+              if [ -f "$PREVIOUS/docker-compose.yml" ]; then
+                cp -a "$PREVIOUS/docker-compose.yml" docker-compose.yml
+                rm -rf traefik && cp -a "$PREVIOUS/traefik" traefik
+                docker compose up -d --remove-orphans --wait --wait-timeout 180 || true
+              else
+                echo "No previous config (first deploy) - nothing to roll back to"
+              fi
+              exit 1
+            fi
+
+            docker compose ps
+            docker image prune -f
