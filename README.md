@@ -34,50 +34,63 @@ www.stepaniuk.me       A  <VPS_IP>
 webhooks.stepaniuk.me  A  <VPS_IP>
 ```
 
-## 2. Host setup (once, as root)
+## 2. Host bootstrap (GitHub Action)
 
-```bash
-# Docker
-curl -fsSL https://get.docker.com | sh
+[scripts/bootstrap-host.sh](scripts/bootstrap-host.sh) is idempotent, so you can re-run it any time to bring a host's config back in line. It sets up:
+- **Packages:** base packages, unattended security upgrades, and a 2G swap file with `swappiness=10` as a safety net against Postgres being OOM-killed.
+- **Docker:** installed with default log rotation and `live-restore`.
+- **Tailscale (host-level VPN):** joins your tailnet using an auth key and prints the Tailscale IP. If `/opt/ys-infra/.env` exists, the script also updates `TAILSCALE_IP` in it.
+- **Docker-waits-for-Tailscale:** a systemd drop-in. Postgres and the Traefik dashboard bind to the Tailscale IP, so without it those containers fail to start after a reboot.
+- **`deploy` user:** in the `docker` group, with the CI public key and ownership of `/opt/ys-infra`.
+- **SSH hardening:** key-only login and root restricted to `prohibit-password`. The script aborts if root has no authorized key, so it can't lock you out.
+- **ufw:** 22, 80 and 443 public; everything else allowed only on `tailscale0`.
 
-# Tailscale
-curl -fsSL https://tailscale.com/install.sh | sh
-tailscale up --ssh=false
-tailscale ip -4   # put this in .env as TAILSCALE_IP
+Run it from GitHub → Actions → **Bootstrap host** → **Run workflow**. It never runs automatically. Inputs: Tailscale hostname, optional tags and swap size.
 
-# Firewall: only 22/80/443 public
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow 22/tcp
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw allow in on tailscale0
-ufw enable
-```
+### One-time prep
 
-SSH hardening: in `/etc/ssh/sshd_config`, set `PasswordAuthentication no` and `PermitRootLogin prohibit-password`, then run `systemctl restart ssh`.
+1. **Root SSH key on the VPS.** Contabo gives you root with a password. Add a dedicated bootstrap key:
+   ```bash
+   ssh-keygen -t ed25519 -C "gha-bootstrap" -f ./gha_bootstrap -N ""
+   ssh-copy-id -i ./gha_bootstrap.pub root@<VPS_IP>
+   ```
+2. **Deploy key** (used later by the deploy workflow as the `deploy` user):
+   ```bash
+   ssh-keygen -t ed25519 -C "gha-deploy" -f ./gha_deploy -N ""
+   ```
+3. **Host fingerprint** for pinning:
+   ```bash
+   ssh-keyscan -t ed25519 <VPS_IP> 2>/dev/null | ssh-keygen -lf - | awk '{print $2}'
+   ```
+4. **Tailscale auth key** (full walkthrough: [docs/tailscale.md](docs/tailscale.md)): in the Tailscale admin console → Settings → Keys, generate one that is **not** ephemeral. Pre-approved is optional. If you use tags (for example `tag:server`, which also disables key expiry for the node), first define them in the ACL under `tagOwners`.
+5. **GitHub secrets:** Settings → Environments → create `production`, then add:
 
-**Make Docker wait for Tailscale.** Postgres and the Traefik dashboard bind to the Tailscale IP. If Docker starts before `tailscaled` has that IP, those containers fail to start after a reboot.
+| Secret                  | Value                                              | Used by   |
+|-------------------------|----------------------------------------------------|-----------|
+| `VPS_HOST`              | VPS public IP                                      | both      |
+| `VPS_SSH_FINGERPRINT`   | `SHA256:...` from step 3                           | both      |
+| `VPS_PORT`              | optional, defaults to `22`                         | both      |
+| `VPS_BOOTSTRAP_SSH_KEY` | contents of `gha_bootstrap` (private)              | bootstrap |
+| `VPS_BOOTSTRAP_USER`    | optional, defaults to `root`                       | bootstrap |
+| `TAILSCALE_AUTHKEY`     | `tskey-auth-...` from step 4                       | bootstrap |
+| `DEPLOY_SSH_PUBKEY`     | contents of `gha_deploy.pub`                       | bootstrap |
+| `VPS_USER`              | `deploy`                                           | deploy    |
+| `VPS_SSH_KEY`           | contents of `gha_deploy` (private)                 | deploy    |
 
-```bash
-mkdir -p /etc/systemd/system/docker.service.d
-cat > /etc/systemd/system/docker.service.d/tailscale.conf <<'EOF'
-[Unit]
-After=tailscaled.service
-Wants=tailscaled.service
-[Service]
-ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do tailscale ip -4 >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
-EOF
-systemctl daemon-reload && systemctl restart docker
-```
+Delete the local `gha_*` key files once the secrets are saved. After the first bootstrap, the Tailscale auth key is only needed again if the node is removed from the tailnet. You can revoke it after the first run.
+
+Running the script by hand instead: `scp scripts/bootstrap-host.sh root@<VPS_IP>:` and then `TS_AUTHKEY=... DEPLOY_SSH_PUBKEY="..." bash bootstrap-host.sh`.
 
 > Note: Docker writes its own iptables rules and **bypasses ufw** for published ports. This setup is safe because only 80/443 are published on all interfaces. Everything else is bound to the Tailscale IP or not published at all. Never add a bare `"5432:5432"`-style port mapping.
 
 ## 3. Deploy
 
 ```bash
-git clone <repo> /opt/ys-infra && cd /opt/ys-infra
-cp .env.example .env && chmod 600 .env   # fill in values
+# First deploy: run as `deploy` on the VPS, or just push / run the "Deploy infra" workflow
+# once .env exists. Create .env from your machine:
+#   scp .env deploy@<VPS_IP>:/opt/ys-infra/.env && ssh deploy@<VPS_IP> chmod 600 /opt/ys-infra/.env
+# then set TAILSCALE_IP in it (the bootstrap output prints it).
+cd /opt/ys-infra
 
 # data first (creates `internal`), then edge (creates `proxy`)
 docker compose -f docker-compose.data.yml up -d --wait
@@ -108,40 +121,7 @@ Check:
 
 `.env` lives **only on the server**. CI never touches it. After editing `.env`, run `docker compose -f <stack file> up -d` for the affected stack on the server, or trigger the workflow manually.
 
-### One-time setup
-
-On the VPS (as root), create a non-root deploy user:
-
-```bash
-adduser --disabled-password --gecos "" --shell /bin/bash deploy
-usermod -aG docker deploy
-mkdir -p /opt/ys-infra && chown -R deploy:deploy /opt/ys-infra
-# then place .env in /opt/ys-infra (chmod 600, owned by deploy)
-```
-
-On your machine, generate a dedicated CI key:
-
-```bash
-ssh-keygen -t ed25519 -C "gha-deploy" -f ./gha_deploy -N ""
-```
-
-Append `gha_deploy.pub` to `/home/deploy/.ssh/authorized_keys` on the VPS. Get the host key fingerprint for pinning:
-
-```bash
-ssh-keyscan -t ed25519 <VPS_IP> 2>/dev/null | ssh-keygen -lf - | awk '{print $2}'
-```
-
-In GitHub → Settings → Environments → create `production` and add these secrets:
-
-| Secret                | Value                                         |
-|-----------------------|-----------------------------------------------|
-| `VPS_HOST`            | VPS public IP                                 |
-| `VPS_USER`            | `deploy`                                      |
-| `VPS_SSH_KEY`         | contents of `gha_deploy` (private key)        |
-| `VPS_SSH_FINGERPRINT` | `SHA256:...` from the command above           |
-| `VPS_PORT`            | optional, defaults to `22`                    |
-
-Delete the local `gha_deploy*` files once the secrets are saved.
+Secrets: see the table in section 2.
 
 > Note: `docker` group membership is effectively root on the host. Keep the deploy key in the `production` environment only. Add required reviewers there if you want a manual approval gate before each deploy.
 

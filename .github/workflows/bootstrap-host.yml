@@ -1,0 +1,71 @@
+name: Bootstrap host
+
+# Manual only: provisions a fresh VPS (Docker, Tailscale, deploy user, SSH
+# hardening, ufw). Idempotent — safe to re-run to converge config.
+on:
+  workflow_dispatch:
+    inputs:
+      ts_hostname:
+        description: Tailscale machine name
+        default: ys-vps
+        required: true
+      ts_tags:
+        description: 'Tailscale tags, e.g. "tag:server" (optional; must exist in ACL tagOwners)'
+        default: ""
+        required: false
+      swap_size:
+        description: Swap file size ("0" to skip)
+        default: 2G
+        required: true
+
+# Shared with deploy-infra: never bootstrap and deploy at the same time.
+concurrency:
+  group: vps
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    name: Bootstrap VPS
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint script
+        run: bash -n scripts/bootstrap-host.sh
+
+      - name: Upload bootstrap script
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          username: ${{ secrets.VPS_BOOTSTRAP_USER || 'root' }}
+          key: ${{ secrets.VPS_BOOTSTRAP_SSH_KEY }}
+          fingerprint: ${{ secrets.VPS_SSH_FINGERPRINT }}
+          source: scripts/bootstrap-host.sh
+          target: /root/ys-bootstrap
+          strip_components: 1
+          rm: true
+
+      - name: Run bootstrap
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+          DEPLOY_SSH_PUBKEY: ${{ secrets.DEPLOY_SSH_PUBKEY }}
+          TS_HOSTNAME: ${{ inputs.ts_hostname }}
+          TS_TAGS: ${{ inputs.ts_tags }}
+          SWAP_SIZE: ${{ inputs.swap_size }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          username: ${{ secrets.VPS_BOOTSTRAP_USER || 'root' }}
+          key: ${{ secrets.VPS_BOOTSTRAP_SSH_KEY }}
+          fingerprint: ${{ secrets.VPS_SSH_FINGERPRINT }}
+          envs: TS_AUTHKEY,DEPLOY_SSH_PUBKEY,TS_HOSTNAME,TS_TAGS,SWAP_SIZE
+          command_timeout: 20m
+          script: |
+            set -euo pipefail
+            bash /root/ys-bootstrap/bootstrap-host.sh

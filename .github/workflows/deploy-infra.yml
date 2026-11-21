@@ -10,9 +10,9 @@ on:
       - .github/workflows/deploy-infra.yml
   workflow_dispatch:
 
-# Never run two deploys at once; queue instead of cancelling a deploy mid-flight.
+# Shared with bootstrap-host: never run two VPS jobs at once; queue, never cancel mid-flight.
 concurrency:
-  group: deploy-infra
+  group: vps
   cancel-in-progress: false
 
 permissions:
