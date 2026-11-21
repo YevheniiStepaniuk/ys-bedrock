@@ -2,7 +2,7 @@
 
 Infrastructure for the stepaniuk.me pet-project stack on a Contabo VPS (4 vCPU / 8 GB, Ubuntu).
 
-There are four separate compose projects. Each has its own lifecycle, so deploying the edge never recreates the databases.
+There are five separate compose projects. Each has its own lifecycle, so deploying the edge never recreates the databases.
 
 | Stack  | File                       | Services          | Owns network |
 |--------|----------------------------|-------------------|--------------|
@@ -10,6 +10,7 @@ There are four separate compose projects. Each has its own lifecycle, so deployi
 | `edge` | `docker-compose.yml`       | traefik           | `proxy`      |
 | `monitoring` | `docker-compose.monitoring.yml` | beszel, beszel-agent, dozzle | — |
 | `tools` | `docker-compose.tools.yml` | pgweb, redis-commander | — |
+| `apps` | `docker-compose.apps.yml` | hello (placeholder for the PWA) | — |
 
 | Service  | Image               | Networks   | Exposure                                   |
 |----------|---------------------|------------|--------------------------------------------|
@@ -20,6 +21,7 @@ There are four separate compose projects. Each has its own lifecycle, so deployi
 | beszel-agent | `henrygd/beszel-agent:0.21.2` | host | none (unix socket)          |
 | dozzle   | `amir20/dozzle:v11.5.0` | default | `TAILSCALE_IP:8081` only (logs UI)   |
 | pgweb    | `sosedoff/pgweb:0.17.0` | `internal`, `tailnet` | `TAILSCALE_IP:8082` only + basic auth (Postgres UI) |
+| hello    | `traefik/whoami:v1.12.0` | `proxy` | `https://stepaniuk.me/` via Traefik |
 | redis-commander | `ghcr.io/joeferner/redis-commander:0.9.1` | `internal`, `tailnet` | `TAILSCALE_IP:8083` only + login (Redis UI) |
 
 Networks:
@@ -105,13 +107,15 @@ docker compose -f docker-compose.data.yml up -d --wait
 docker compose -f docker-compose.yml up -d --wait
 docker compose -f docker-compose.monitoring.yml up -d --wait
 docker compose -f docker-compose.tools.yml up -d --wait
+docker compose -f docker-compose.apps.yml up -d --wait
 
 docker compose -f docker-compose.data.yml ps
 docker compose -f docker-compose.yml ps
 ```
 
 Check:
-- `https://www.stepaniuk.me` should 301 to `https://stepaniuk.me`. It will 404 until an app serves the apex.
+- `https://stepaniuk.me` should show the `hello` page: request info from `traefik/whoami`, starting with `Name: hello-stepaniuk.me`.
+- `https://www.stepaniuk.me` should 301 to `https://stepaniuk.me`.
 - Traefik dashboard: `http://<TAILSCALE_IP>:8080`, reachable over Tailscale only.
 - Postgres from DBeaver: `<TAILSCALE_IP>:5432`.
 - Beszel (resource stats): `http://<TAILSCALE_IP>:8090`. Create the admin account right away, then enable the agent: [docs/monitoring.md](docs/monitoring.md).
@@ -141,7 +145,7 @@ Secrets: see the table in section 2.
 
 ## Adding an app (template)
 
-Apps live in their own stack and join both networks as external. `depends_on` doesn't work across projects, so apps must retry their DB connection on startup.
+Add apps to [docker-compose.apps.yml](docker-compose.apps.yml), next to `hello`. To replace `hello` with the PWA, keep the `Host(`stepaniuk.me`)` router and change the image and port. Apps join both networks as external. `depends_on` doesn't work across projects, so apps must retry their DB connection on startup.
 
 ```yaml
 name: apps

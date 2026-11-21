@@ -8,6 +8,7 @@ on:
       - docker-compose.data.yml
       - docker-compose.monitoring.yml
       - docker-compose.tools.yml
+      - docker-compose.apps.yml
       - traefik/**
       - .github/workflows/deploy-infra.yml
   workflow_dispatch:
@@ -42,7 +43,7 @@ jobs:
           TOOLS_USER: ci
           TOOLS_PASSWORD: ci
         run: |
-          for f in docker-compose.data.yml docker-compose.yml docker-compose.monitoring.yml docker-compose.tools.yml; do
+          for f in docker-compose.data.yml docker-compose.yml docker-compose.monitoring.yml docker-compose.tools.yml docker-compose.apps.yml; do
             docker compose -f "$f" config -q
             echo "ok: $f"
           done
@@ -71,7 +72,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           fingerprint: ${{ secrets.VPS_SSH_FINGERPRINT }}
-          source: docker-compose.yml,docker-compose.data.yml,docker-compose.monitoring.yml,docker-compose.tools.yml,traefik
+          source: docker-compose.yml,docker-compose.data.yml,docker-compose.monitoring.yml,docker-compose.tools.yml,docker-compose.apps.yml,traefik
           target: ${{ env.DEPLOY_DIR }}/.deploy/incoming
           rm: true
 
@@ -93,9 +94,9 @@ jobs:
 
             INCOMING=.deploy/incoming
             PREVIOUS=.deploy/previous
-            # Order matters: data owns `internal` + `tailnet`, edge owns `proxy`; tools needs data.
-            STACKS="docker-compose.data.yml docker-compose.yml docker-compose.monitoring.yml docker-compose.tools.yml"
-            FILES="docker-compose.data.yml docker-compose.yml docker-compose.monitoring.yml docker-compose.tools.yml traefik"
+            # Order matters: data owns `internal` + `tailnet`, edge owns `proxy`; tools needs data; apps needs edge.
+            STACKS="docker-compose.data.yml docker-compose.yml docker-compose.monitoring.yml docker-compose.tools.yml docker-compose.apps.yml"
+            FILES="docker-compose.data.yml docker-compose.yml docker-compose.monitoring.yml docker-compose.tools.yml docker-compose.apps.yml traefik"
 
             if [ ! -f .env ]; then
               echo "::error::$DEPLOY_DIR/.env missing on server"; exit 1

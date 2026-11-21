@@ -17,7 +17,7 @@ http:
 
     www-to-apex:
       redirectRegex:
-        regex: "^https?://www\\.stepaniuk\\.me/(.*)"
+        regex: "^https?://www\\.stepaniuk\\.me(?::\\d+)?/(.*)"
         replacement: "https://stepaniuk.me/${1}"
         permanent: true
 

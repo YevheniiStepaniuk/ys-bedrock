@@ -1,0 +1,44 @@
+# Apps stack: web-facing services routed by Traefik.
+# Joins `proxy` (owned by edge stack) and, when needed, `internal` (owned by data stack).
+#
+#   docker compose -f docker-compose.apps.yml up -d
+#
+# `hello` is a placeholder for https://stepaniuk.me/ — replace it with the PWA later.
+
+name: apps
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+networks:
+  proxy:
+    external: true
+
+services:
+  hello:
+    image: traefik/whoami:v1.12.0   # ~6 MB Go binary, echoes request info
+    container_name: hello
+    restart: unless-stopped
+    logging: *logging
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    environment:
+      WHOAMI_NAME: hello-stepaniuk.me
+      WHOAMI_PORT_NUMBER: "80"
+    networks:
+      - proxy
+    deploy:
+      resources:
+        limits:
+          memory: 32M
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.hello.rule=Host(`${DOMAIN:-stepaniuk.me}`)
+      - traefik.http.routers.hello.entrypoints=websecure
+      - traefik.http.routers.hello.tls.certresolver=le
+      - traefik.http.routers.hello.middlewares=secure-headers@file
+      - traefik.http.services.hello.loadbalancer.server.port=80
