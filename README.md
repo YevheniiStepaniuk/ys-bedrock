@@ -2,22 +2,30 @@
 
 Infrastructure for the stepaniuk.me pet-project stack on a Contabo VPS (4 vCPU / 8 GB, Ubuntu).
 
-There are two separate compose projects. Each has its own lifecycle, so deploying the edge never recreates the databases.
+There are four separate compose projects. Each has its own lifecycle, so deploying the edge never recreates the databases.
 
 | Stack  | File                       | Services          | Owns network |
 |--------|----------------------------|-------------------|--------------|
-| `data` | `docker-compose.data.yml`  | postgres, redis   | `internal`   |
+| `data` | `docker-compose.data.yml`  | postgres, redis   | `internal`, `tailnet` |
 | `edge` | `docker-compose.yml`       | traefik           | `proxy`      |
+| `monitoring` | `docker-compose.monitoring.yml` | beszel, beszel-agent, dozzle | — |
+| `tools` | `docker-compose.tools.yml` | pgweb, redis-commander | — |
 
 | Service  | Image               | Networks   | Exposure                                   |
 |----------|---------------------|------------|--------------------------------------------|
 | traefik  | `traefik:v3.4`      | `proxy`    | `:80`, `:443` public; dashboard `TAILSCALE_IP:8080` |
-| postgres | `postgres:16-alpine`| `internal` | `TAILSCALE_IP:5432` only                   |
+| postgres | `postgres:16-alpine`| `internal`, `tailnet` | `TAILSCALE_IP:5432` only                   |
 | redis    | `redis:7-alpine`    | `internal` | none                                       |
+| beszel   | `henrygd/beszel:0.21.2` | default | `TAILSCALE_IP:8090` only (stats UI)  |
+| beszel-agent | `henrygd/beszel-agent:0.21.2` | host | none (unix socket)          |
+| dozzle   | `amir20/dozzle:v11.5.0` | default | `TAILSCALE_IP:8081` only (logs UI)   |
+| pgweb    | `sosedoff/pgweb:0.17.0` | `internal`, `tailnet` | `TAILSCALE_IP:8082` only + basic auth (Postgres UI) |
+| redis-commander | `ghcr.io/joeferner/redis-commander:0.9.1` | `internal`, `tailnet` | `TAILSCALE_IP:8083` only + login (Redis UI) |
 
 Networks:
 - `proxy`: Traefik and the web-facing apps.
 - `internal`: Postgres, Redis and the backend apps. It is `internal: true`, so there is **no internet egress**. A container that needs egress (bots, backup sidecar) also joins `proxy`.
+- `tailnet`: a bridge with IP masquerading off. Docker **ignores `ports:` for containers attached only to an `internal: true` network**, so every service published on `TAILSCALE_IP` that also sits on `internal` (postgres, the DB UIs) joins `tailnet` as well. Because there is no masquerade (SNAT), inbound published ports work but outbound traffic can't reach the internet.
 - Each stack creates the network it owns. Other stacks join it with `external: true`.
 
 Volume names are fixed (`postgres-data`, `redis-data`, `traefik-certs`) rather than prefixed with the project name. Renaming a project therefore never orphans data.
@@ -95,6 +103,8 @@ cd /opt/ys-infra
 # data first (creates `internal`), then edge (creates `proxy`)
 docker compose -f docker-compose.data.yml up -d --wait
 docker compose -f docker-compose.yml up -d --wait
+docker compose -f docker-compose.monitoring.yml up -d --wait
+docker compose -f docker-compose.tools.yml up -d --wait
 
 docker compose -f docker-compose.data.yml ps
 docker compose -f docker-compose.yml ps
@@ -104,6 +114,10 @@ Check:
 - `https://www.stepaniuk.me` should 301 to `https://stepaniuk.me`. It will 404 until an app serves the apex.
 - Traefik dashboard: `http://<TAILSCALE_IP>:8080`, reachable over Tailscale only.
 - Postgres from DBeaver: `<TAILSCALE_IP>:5432`.
+- Beszel (resource stats): `http://<TAILSCALE_IP>:8090`. Create the admin account right away, then enable the agent: [docs/monitoring.md](docs/monitoring.md).
+- Dozzle (logs): `http://<TAILSCALE_IP>:8081`.
+- pgweb (Postgres UI): `http://<TAILSCALE_IP>:8082`, user/password `TOOLS_USER`/`TOOLS_PASSWORD`.
+- Redis Commander (Redis UI): `http://<TAILSCALE_IP>:8083`, same credentials.
 
 ## 4. CI/CD (auto-deploy on change)
 

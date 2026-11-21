@@ -20,6 +20,13 @@ networks:
   internal:
     name: internal
     internal: true
+  # Docker ignores `ports:` for containers attached ONLY to an internal network.
+  # Services that publish on TAILSCALE_IP (postgres, DB UIs) also join this one.
+  # Masquerade off = inbound published ports work, but no outbound internet (no SNAT).
+  tailnet:
+    name: tailnet
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
 
 # Fixed names (not project-prefixed) so renaming the project never orphans data.
 volumes:
@@ -72,6 +79,7 @@ services:
       - "${TAILSCALE_IP:?TAILSCALE_IP is required}:5432:5432"
     networks:
       - internal
+      - tailnet
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s

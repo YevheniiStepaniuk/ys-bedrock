@@ -69,10 +69,10 @@ Tagging the VPS means: it is owned by the tailnet (not your personal user), its 
    Optional, stricter — only allow the ports actually used:
 
    ```jsonc
-   "ip": ["tcp:5432", "tcp:8080", "tcp:22"]
+   "ip": ["tcp:5432", "tcp:8080", "tcp:8081", "tcp:8082", "tcp:8083", "tcp:8090", "tcp:22"]
    ```
 
-   (Add Beszel / Dozzle ports here later.)
+   (5432 Postgres, 8080 Traefik dashboard, 8081 Dozzle, 8082 pgweb, 8083 Redis Commander, 8090 Beszel, 22 SSH.)
 
 3. Click **Save**.
 
@@ -167,6 +167,10 @@ After the first deploy:
 | What               | URL / connection                                     |
 |--------------------|------------------------------------------------------|
 | Traefik dashboard  | `http://ys-vps:8080` or `http://100.x.x.x:8080`       |
+| Dozzle (logs)      | `http://ys-vps:8081`                                  |
+| Beszel (stats)     | `http://ys-vps:8090`                                  |
+| pgweb (Postgres)   | `http://ys-vps:8082` (basic auth: `TOOLS_USER`/`TOOLS_PASSWORD`) |
+| Redis Commander    | `http://ys-vps:8083` (login: same credentials)        |
 | Postgres (DBeaver) | host `ys-vps` (or `100.x.x.x`), port `5432`, user/pass from `.env` |
 | SSH over Tailscale | `ssh deploy@ys-vps`                                   |
 
