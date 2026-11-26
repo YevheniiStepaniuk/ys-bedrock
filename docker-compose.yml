@@ -23,7 +23,7 @@ volumes:
 
 services:
   traefik:
-    image: traefik:v3.4
+    image: traefik:v3.6   # >=3.6.1 negotiates Docker API; 3.4 speaks 1.24, rejected by Docker 29+
     container_name: traefik
     restart: unless-stopped
     logging: *logging
