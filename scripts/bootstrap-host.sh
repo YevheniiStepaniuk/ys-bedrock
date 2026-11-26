@@ -128,6 +128,8 @@ fi
 chown "$DEPLOY_USER:$DEPLOY_USER" "$AUTH_KEYS"
 chmod 600 "$AUTH_KEYS"
 install -d -m 750 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$DEPLOY_DIR"
+# Anything created there as root (manual scp, earlier deploys) must stay usable by CI.
+chown -R "$DEPLOY_USER:$DEPLOY_USER" "$DEPLOY_DIR"
 
 # Keep .env's TAILSCALE_IP in sync if .env already exists.
 ENV_FILE="$DEPLOY_DIR/.env"
@@ -147,7 +149,11 @@ log "SSH hardening (key-only)"
 if [ ! -s /root/.ssh/authorized_keys ]; then
   die "/root/.ssh/authorized_keys is empty — add a key before disabling passwords"
 fi
-cat > /etc/ssh/sshd_config.d/99-ys-hardening.conf <<'EOF'
+# sshd keeps the FIRST value it reads per option, and drop-ins load in lexical order.
+# Cloud images ship 50-cloud-init.conf with `PasswordAuthentication yes`, so our file
+# must sort first (00-) to win.
+rm -f /etc/ssh/sshd_config.d/99-ys-hardening.conf
+cat > /etc/ssh/sshd_config.d/00-ys-hardening.conf <<'EOF'
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin prohibit-password
@@ -157,6 +163,9 @@ MaxAuthTries 3
 EOF
 sshd -t
 systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || systemctl restart ssh
+# Capture first: `sshd -T | grep -q` trips pipefail via SIGPIPE when grep exits early.
+SSHD_EFFECTIVE="$(sshd -T)"
+grep -qx 'passwordauthentication no' <<<"$SSHD_EFFECTIVE" || die "sshd still allows passwords (check /etc/ssh/sshd_config.d)"
 
 # ---------------------------------------------------------------------------
 log "Firewall (ufw)"
