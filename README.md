@@ -10,7 +10,7 @@ There are five separate compose projects. Each has its own lifecycle, so deployi
 | `edge` | `docker-compose.yml`       | traefik           | `proxy`      |
 | `monitoring` | `docker-compose.monitoring.yml` | beszel, beszel-agent, dozzle | — |
 | `tools` | `docker-compose.tools.yml` | pgweb, redis-commander | — |
-| `apps` | `docker-compose.apps.yml` | hello (placeholder for the PWA) | — |
+| `apps` | `docker-compose.apps.yml` | hello (placeholder for the PWA), words-api, words-web | `words` |
 
 | Service  | Image               | Networks   | Exposure                                   |
 |----------|---------------------|------------|--------------------------------------------|
@@ -23,6 +23,8 @@ There are five separate compose projects. Each has its own lifecycle, so deployi
 | dozzle   | `amir20/dozzle:v11.5.0` | default | `TAILSCALE_IP:8081` only (logs UI)   |
 | pgweb    | `sosedoff/pgweb:0.17.0` | `internal`, `tailnet` | `TAILSCALE_IP:8082` only + basic auth (Postgres UI) |
 | hello    | `traefik/whoami:v1.12.0` | `proxy` | `https://stepaniuk.me/` via Traefik |
+| words-api | `ghcr.io/yevheniistepaniuk/wordlearningapp-api` | `proxy`, `internal`, `words` | `https://words.stepaniuk.me/api*`, `/health` via Traefik ([docs/wordlearning.md](docs/wordlearning.md)) |
+| words-web | `ghcr.io/yevheniistepaniuk/wordlearningapp-web` | `proxy`, `words` | `https://words.stepaniuk.me/` (all other paths) via Traefik |
 | redis-commander | `ghcr.io/joeferner/redis-commander:0.9.1` | `internal`, `tailnet` | `TAILSCALE_IP:8083` only + login (Redis UI) |
 
 Networks:
@@ -35,7 +37,7 @@ Networks:
 
 Volume names are fixed (`postgres-data`, `redis-data`, `traefik-certs`) rather than prefixed with the project name. Renaming a project therefore never orphans data.
 
-Domains: `stepaniuk.me`, `www.stepaniuk.me` (redirects to the apex), `webhooks.stepaniuk.me`.
+Domains: `stepaniuk.me`, `www.stepaniuk.me` (redirects to the apex), `webhooks.stepaniuk.me`, `words.stepaniuk.me` (WordLearning).
 
 ## 1. DNS
 
@@ -45,6 +47,7 @@ Create A records pointing at the VPS public IPv4:
 stepaniuk.me           A  <VPS_IP>
 www.stepaniuk.me       A  <VPS_IP>
 webhooks.stepaniuk.me  A  <VPS_IP>
+words.stepaniuk.me     A  <VPS_IP>
 ```
 
 ## 2. Host bootstrap (GitHub Action)
@@ -125,6 +128,7 @@ Check:
 - Dozzle (logs): `http://<TAILSCALE_IP>:8081`.
 - pgweb (Postgres UI): `http://<TAILSCALE_IP>:8082`, user/password `TOOLS_USER`/`TOOLS_PASSWORD`.
 - Redis Commander (Redis UI): `http://<TAILSCALE_IP>:8083`, same credentials.
+- WordLearning: `https://words.stepaniuk.me/health` answers `{"status":"ok",...}`. Needs one-time setup first (DB, secrets, images): [docs/wordlearning.md](docs/wordlearning.md).
 
 ## 4. CI/CD (auto-deploy on change)
 

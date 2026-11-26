@@ -4,6 +4,7 @@
 #   docker compose -f docker-compose.apps.yml up -d
 #
 # `hello` is a placeholder for https://stepaniuk.me/ — replace it with the PWA later.
+# `words-api` + `words-web` are WordLearning at https://words.stepaniuk.me (docs/wordlearning.md).
 
 name: apps
 
@@ -16,6 +17,12 @@ x-logging: &logging
 networks:
   proxy:
     external: true
+  internal:
+    external: true   # reach postgres / redis (owned by the data stack)
+  # Private to the WordLearning services: the web image's Caddyfile proxies to `api:8787`,
+  # so `api` is an alias here only and never on the shared `proxy` network.
+  words:
+    name: words
 
 services:
   hello:
@@ -42,3 +49,87 @@ services:
       - traefik.http.routers.hello.tls.certresolver=le
       - traefik.http.routers.hello.middlewares=secure-headers@file
       - traefik.http.services.hello.loadbalancer.server.port=80
+
+  # --- WordLearning (https://words.stepaniuk.me) — setup: docs/wordlearning.md ---------------
+  # One origin: Traefik sends /api and /health straight to `words-api`, everything else to
+  # `words-web` (the PWA). /api skips the web image's Caddy on purpose: Caddy would replace
+  # X-Forwarded-For with Traefik's address, and the API's per-IP auth-failure limit would then
+  # count every client together. Traefik drops client-sent X-Forwarded-* and sets the real IP.
+  words-api:
+    image: ghcr.io/yevheniistepaniuk/wordlearningapp-api:${WORDS_TAG:-latest}
+    container_name: words-api
+    restart: unless-stopped
+    logging: *logging
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    # App secrets (OPENROUTER_API_KEY, API_TOKEN, WEB_PASSWORD_HASH) live in their own file on
+    # the server, so the API never sees the infra secrets in .env and vice versa.
+    # Optional so CI and the other stacks validate without it; the API refuses to start
+    # (and the apps deploy rolls back) until it exists.
+    env_file:
+      - path: .env.wordlearning
+        required: false
+    # Wins over env_file. Shared postgres/redis credentials come from the infra .env.
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${WORDS_POSTGRES_DB:-wordlearning}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/1
+      PORT: "8787"
+      TRUST_PROXY: "true"
+      WEB_ORIGIN: https://${WORDS_DOMAIN:-words.stepaniuk.me}
+    networks:
+      proxy: {}      # Traefik + egress to OpenRouter (`internal` has no internet)
+      internal: {}   # postgres, redis
+      words:
+        aliases: [api]
+    # Image HEALTHCHECK: GET /health (checks db + redis).
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.words-api.rule=Host(`${WORDS_DOMAIN:-words.stepaniuk.me}`) && (Path(`/api`) || PathPrefix(`/api/`) || Path(`/health`) || Path(`/health/`))
+      - traefik.http.routers.words-api.priority=100
+      - traefik.http.routers.words-api.entrypoints=websecure
+      - traefik.http.routers.words-api.tls.certresolver=le
+      - traefik.http.routers.words-api.middlewares=secure-headers@file
+      - traefik.http.routers.words-api.service=words-api
+      - traefik.http.services.words-api.loadbalancer.server.port=8787
+
+  # The web image is Caddy + the built PWA + its Caddyfile. DOMAIN=":80" makes Caddy serve plain
+  # HTTP with no ACME; Traefik terminates TLS. Caddy already sets HSTS, nosniff, Referrer-Policy,
+  # the CSP and cache headers, so this router adds no secure-headers (it would loosen
+  # Referrer-Policy).
+  words-web:
+    image: ghcr.io/yevheniistepaniuk/wordlearningapp-web:${WORDS_TAG:-latest}
+    container_name: words-web
+    restart: unless-stopped
+    logging: *logging
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      DOMAIN: ":80"
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is required}   # Caddyfile's global `email` needs a value; unused over HTTP
+    networks:
+      - proxy
+      - words
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.words-web.rule=Host(`${WORDS_DOMAIN:-words.stepaniuk.me}`)
+      - traefik.http.routers.words-web.entrypoints=websecure
+      - traefik.http.routers.words-web.tls.certresolver=le
+      - traefik.http.routers.words-web.service=words-web
+      - traefik.http.services.words-web.loadbalancer.server.port=80
