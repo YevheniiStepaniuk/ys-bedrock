@@ -10,6 +10,7 @@ on:
       - docker-compose.tools.yml
       - docker-compose.apps.yml
       - traefik/**
+      - backup/**
       - .github/workflows/deploy-infra.yml
   workflow_dispatch:
     inputs:
@@ -46,6 +47,7 @@ jobs:
           filters: |
             data:
               - docker-compose.data.yml
+              - backup/**
             edge:
               - docker-compose.yml
               - traefik/**
@@ -104,6 +106,13 @@ jobs:
             echo "ok: $f"
           done
 
+      - name: Lint backup scripts
+        working-directory: backup
+        run: shellcheck -x -s sh ./*.sh
+
+      - name: Build backup image
+        run: docker build -q -t ys/pg-backup:ci backup
+
       - name: Validate Traefik dynamic config (YAML)
         run: |
           for f in traefik/dynamic/*.yml; do
@@ -129,7 +138,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           fingerprint: ${{ secrets.VPS_SSH_FINGERPRINT }}
-          source: docker-compose.yml,docker-compose.data.yml,docker-compose.monitoring.yml,docker-compose.tools.yml,docker-compose.apps.yml,traefik
+          source: docker-compose.yml,docker-compose.data.yml,docker-compose.monitoring.yml,docker-compose.tools.yml,docker-compose.apps.yml,traefik,backup
           target: ${{ env.DEPLOY_DIR }}/.deploy/incoming
           rm: true
 
@@ -154,7 +163,7 @@ jobs:
             PREVIOUS=.deploy/previous
             # All stack files (validated + installed every time so server mirrors the repo).
             ALL_STACKS="docker-compose.data.yml docker-compose.yml docker-compose.monitoring.yml docker-compose.tools.yml docker-compose.apps.yml"
-            FILES="docker-compose.data.yml docker-compose.yml docker-compose.monitoring.yml docker-compose.tools.yml docker-compose.apps.yml traefik"
+            FILES="docker-compose.data.yml docker-compose.yml docker-compose.monitoring.yml docker-compose.tools.yml docker-compose.apps.yml traefik backup"
 
             if [ ! -f .env ]; then
               echo "::error::$DEPLOY_DIR/.env missing on server"; exit 1
@@ -181,8 +190,9 @@ jobs:
               for f in $STACKS; do
                 [ -f "$f" ] || continue
                 echo "::group::up $f"
-                docker compose -f "$f" pull --quiet || return 1
-                docker compose -f "$f" up -d --remove-orphans --wait --wait-timeout 180 || return 1
+                # --ignore-buildable: locally built images (pg-backup) are built by `up --build`.
+                docker compose -f "$f" pull --quiet --ignore-buildable || return 1
+                docker compose -f "$f" up -d --build --remove-orphans --wait --wait-timeout 180 || return 1
                 docker compose -f "$f" ps
                 echo "::endgroup::"
               done

@@ -6,7 +6,7 @@ There are five separate compose projects. Each has its own lifecycle, so deployi
 
 | Stack  | File                       | Services          | Owns network |
 |--------|----------------------------|-------------------|--------------|
-| `data` | `docker-compose.data.yml`  | postgres, redis   | `internal`, `tailnet` |
+| `data` | `docker-compose.data.yml`  | postgres, redis, pg-backup | `internal`, `tailnet`, `backup-egress` |
 | `edge` | `docker-compose.yml`       | traefik           | `proxy`      |
 | `monitoring` | `docker-compose.monitoring.yml` | beszel, beszel-agent, dozzle | — |
 | `tools` | `docker-compose.tools.yml` | pgweb, redis-commander | — |
@@ -17,6 +17,7 @@ There are five separate compose projects. Each has its own lifecycle, so deployi
 | traefik  | `traefik:v3.4`      | `proxy`    | `:80`, `:443` public; dashboard `TAILSCALE_IP:8080` |
 | postgres | `postgres:16-alpine`| `internal`, `tailnet` | `TAILSCALE_IP:5432` only                   |
 | redis    | `redis:7-alpine`    | `internal` | none                                       |
+| pg-backup | built from `backup/` (`postgres:16-alpine` + rclone + gpg) | `internal`, `backup-egress` | none: daily encrypted dumps to R2 ([docs/backups.md](docs/backups.md)) |
 | beszel   | `henrygd/beszel:0.21.2` | default | `TAILSCALE_IP:8090` only (stats UI)  |
 | beszel-agent | `henrygd/beszel-agent:0.21.2` | host | none (unix socket)          |
 | dozzle   | `amir20/dozzle:v11.5.0` | default | `TAILSCALE_IP:8081` only (logs UI)   |
@@ -29,6 +30,8 @@ Networks:
 - `internal`: Postgres, Redis and the backend apps. It is `internal: true`, so there is **no internet egress**. A container that needs egress (bots, backup sidecar) also joins `proxy`.
 - `tailnet`: a bridge with IP masquerading off. Docker **ignores `ports:` for containers attached only to an `internal: true` network**, so every service published on `TAILSCALE_IP` that also sits on `internal` (postgres, the DB UIs) joins `tailnet` as well. Because there is no masquerade (SNAT), inbound published ports work but outbound traffic can't reach the internet.
 - Each stack creates the network it owns. Other stacks join it with `external: true`.
+
+**Backups:** `pg-backup` (opt-in via the `backup` compose profile) dumps every database daily, then verifies, encrypts with gpg AES256 and uploads to Cloudflare R2, keeping 14 days. Setup, restore and disaster recovery: [docs/backups.md](docs/backups.md).
 
 Volume names are fixed (`postgres-data`, `redis-data`, `traefik-certs`) rather than prefixed with the project name. Renaming a project therefore never orphans data.
 
@@ -129,7 +132,7 @@ Check:
 
 | Changed path                     | Stack deployed |
 |----------------------------------|----------------|
-| `docker-compose.data.yml`        | `data`         |
+| `docker-compose.data.yml`, `backup/**` | `data` (rebuilds `pg-backup`) |
 | `docker-compose.yml`, `traefik/**` | `edge`       |
 | `docker-compose.monitoring.yml`  | `monitoring`   |
 | `docker-compose.tools.yml`       | `tools`        |
