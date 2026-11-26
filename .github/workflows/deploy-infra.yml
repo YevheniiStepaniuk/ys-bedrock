@@ -12,6 +12,11 @@ on:
       - traefik/**
       - .github/workflows/deploy-infra.yml
   workflow_dispatch:
+    inputs:
+      stacks:
+        description: 'Stacks to deploy: "all" or space-separated subset of: data edge monitoring tools apps'
+        default: all
+        required: true
 
 # Shared with bootstrap-host: never run two VPS jobs at once; queue, never cancel mid-flight.
 concurrency:
@@ -25,6 +30,57 @@ env:
   DEPLOY_DIR: /opt/ys-infra
 
 jobs:
+  # Decide which stacks actually changed. Only those get `pull` + `up`.
+  changes:
+    name: Detect changed stacks
+    runs-on: ubuntu-latest
+    outputs:
+      stacks: ${{ steps.pick.outputs.stacks }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name == 'push'
+        with:
+          filters: |
+            data:
+              - docker-compose.data.yml
+            edge:
+              - docker-compose.yml
+              - traefik/**
+            monitoring:
+              - docker-compose.monitoring.yml
+            tools:
+              - docker-compose.tools.yml
+            apps:
+              - docker-compose.apps.yml
+            all:
+              - .github/workflows/deploy-infra.yml
+
+      - name: Pick stacks
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT: ${{ inputs.stacks }}
+          CHANGED: ${{ join(fromJSON(steps.filter.outputs.changes || '[]'), ' ') }}
+        run: |
+          ORDER="data edge monitoring tools apps"
+          if [ "$EVENT" = "workflow_dispatch" ]; then WANT="$INPUT"; else WANT="$CHANGED"; fi
+          case " $WANT " in *" all "*) WANT="$ORDER" ;; esac
+          for s in $WANT; do
+            case " $ORDER " in *" $s "*) ;; *) echo "::error::Unknown stack '$s' (allowed: $ORDER)"; exit 1 ;; esac
+          done
+          # Keep dependency order regardless of input order.
+          PICKED=""
+          for s in $ORDER; do
+            case " $WANT " in *" $s "*) PICKED="$PICKED $s" ;; esac
+          done
+          PICKED="${PICKED# }"
+          echo "stacks=$PICKED" >> "$GITHUB_OUTPUT"
+          echo "### Stacks to deploy: ${PICKED:-none}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Stacks to deploy: ${PICKED:-none}"
+
   validate:
     name: Validate config
     runs-on: ubuntu-latest
@@ -56,8 +112,9 @@ jobs:
           done
 
   deploy:
-    name: Deploy to VPS
-    needs: validate
+    name: Deploy (${{ needs.changes.outputs.stacks }})
+    needs: [changes, validate]
+    if: needs.changes.outputs.stacks != ''
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -80,13 +137,14 @@ jobs:
         uses: appleboy/ssh-action@v1.2.0
         env:
           DEPLOY_DIR: ${{ env.DEPLOY_DIR }}
+          DEPLOY_STACKS: ${{ needs.changes.outputs.stacks }}
         with:
           host: ${{ secrets.VPS_HOST }}
           port: ${{ secrets.VPS_PORT || 22 }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           fingerprint: ${{ secrets.VPS_SSH_FINGERPRINT }}
-          envs: DEPLOY_DIR
+          envs: DEPLOY_DIR,DEPLOY_STACKS
           command_timeout: 10m
           script: |
             set -euo pipefail
@@ -94,13 +152,28 @@ jobs:
 
             INCOMING=.deploy/incoming
             PREVIOUS=.deploy/previous
-            # Order matters: data owns `internal` + `tailnet`, edge owns `proxy`; tools needs data; apps needs edge.
-            STACKS="docker-compose.data.yml docker-compose.yml docker-compose.monitoring.yml docker-compose.tools.yml docker-compose.apps.yml"
+            # All stack files (validated + installed every time so server mirrors the repo).
+            ALL_STACKS="docker-compose.data.yml docker-compose.yml docker-compose.monitoring.yml docker-compose.tools.yml docker-compose.apps.yml"
             FILES="docker-compose.data.yml docker-compose.yml docker-compose.monitoring.yml docker-compose.tools.yml docker-compose.apps.yml traefik"
 
             if [ ! -f .env ]; then
               echo "::error::$DEPLOY_DIR/.env missing on server"; exit 1
             fi
+
+            # Only changed stacks get pull + up. Order (from CI) already respects dependencies:
+            # data owns `internal` + `tailnet`, edge owns `proxy`; tools needs data; apps needs edge.
+            STACKS=""
+            for s in $DEPLOY_STACKS; do
+              case "$s" in
+                data)       STACKS="$STACKS docker-compose.data.yml" ;;
+                edge)       STACKS="$STACKS docker-compose.yml" ;;
+                monitoring) STACKS="$STACKS docker-compose.monitoring.yml" ;;
+                tools)      STACKS="$STACKS docker-compose.tools.yml" ;;
+                apps)       STACKS="$STACKS docker-compose.apps.yml" ;;
+                *) echo "::error::Unknown stack '$s'"; exit 1 ;;
+              esac
+            done
+            echo "Deploying stacks: $DEPLOY_STACKS"
 
             # Pull + recreate only services whose config/image changed; wait for healthchecks.
             # Explicit `|| return 1`: set -e is disabled inside functions called from `if`.
@@ -115,8 +188,8 @@ jobs:
               done
             }
 
-            # 1. Validate new stacks against the REAL .env before touching anything.
-            for f in $STACKS; do
+            # 1. Validate ALL new stack files against the REAL .env before touching anything.
+            for f in $ALL_STACKS; do
               docker compose -f "$INCOMING/$f" --env-file .env --project-directory . config -q
             done
 

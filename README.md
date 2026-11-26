@@ -125,19 +125,31 @@ Check:
 
 ## 4. CI/CD (auto-deploy on change)
 
-[.github/workflows/deploy-infra.yml](.github/workflows/deploy-infra.yml) runs on every push to `main` that changes `docker-compose.yml`, `docker-compose.data.yml`, `traefik/**` or the workflow file. You can also start it manually with **Run workflow**.
+[.github/workflows/deploy-infra.yml](.github/workflows/deploy-infra.yml) runs on every push to `main` that touches a stack file, `traefik/**` or the workflow itself. It **deploys only the stacks that changed**:
 
-1. **validate**: runs `docker compose config -q` with dummy env values and a YAML check of `traefik/dynamic/*.yml`.
-2. **deploy** (GitHub environment `production`):
-   - SCPs the files to `/opt/ys-infra/.deploy/incoming`.
-   - Validates them against the **real** `.env` on the server.
-   - Snapshots the current config to `.deploy/previous`.
-   - Swaps the new files in.
-   - For each stack, in order `data` then `edge`, runs `docker compose pull` and `up -d --remove-orphans --wait`.
-3. **Only changed services restart.** Compose recreates a container only when its config or image changes. Traefik hot-reloads `traefik/dynamic/*` without restarting.
-4. **Rollback:** if any healthcheck fails within 180s, the previous config is restored and brought back up, and the job fails.
+| Changed path                     | Stack deployed |
+|----------------------------------|----------------|
+| `docker-compose.data.yml`        | `data`         |
+| `docker-compose.yml`, `traefik/**` | `edge`       |
+| `docker-compose.monitoring.yml`  | `monitoring`   |
+| `docker-compose.tools.yml`       | `tools`        |
+| `docker-compose.apps.yml`        | `apps`         |
+| `.github/workflows/deploy-infra.yml` | all        |
 
-`.env` lives **only on the server**. CI never touches it. After editing `.env`, run `docker compose -f <stack file> up -d` for the affected stack on the server, or trigger the workflow manually.
+Jobs:
+1. **changes**: uses `dorny/paths-filter` to diff the push and pick the changed stacks, always in dependency order: `data` → `edge` → `monitoring` → `tools` → `apps`. The run summary shows the list.
+2. **validate**: runs `docker compose config -q` on every stack with dummy env values, plus a YAML check of `traefik/dynamic/*.yml`.
+3. **deploy** (GitHub environment `production`; skipped if nothing changed):
+   - SCPs **all** files to `/opt/ys-infra/.deploy/incoming`, so the server always mirrors the repo.
+   - Validates all of them against the **real** `.env` on the server.
+   - Snapshots the current config to `.deploy/previous` and swaps the new files in.
+   - Runs `docker compose pull` and `up -d --remove-orphans --wait` **only for the changed stacks**. Unchanged stacks aren't touched at all: no pull, no up.
+4. **Within a stack, only changed services restart.** Compose recreates a container only when its config or image changes. Traefik hot-reloads `traefik/dynamic/*` without restarting.
+5. **Rollback:** if any healthcheck fails within 180s, the previous files are restored, the same stacks are brought back up, and the job fails.
+
+**Manual run:** Actions → **Deploy infra** → **Run workflow**. The `stacks` input is `all` (the default) or a space-separated subset, for example `edge apps`. Use it after editing `.env` on the server, or to force a redeploy or image refresh.
+
+`.env` lives **only on the server**. CI never touches it, so editing it doesn't trigger anything. Run the workflow manually for the affected stacks, or run `docker compose -f <stack file> up -d` on the server.
 
 Secrets: see the table in section 2.
 
